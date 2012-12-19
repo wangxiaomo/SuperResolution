@@ -103,6 +103,34 @@ namespace cv
             std::vector<Mat> flows;
         };
 
+        class SUPER_RESOLUTION_EXPORT Dual_TVL1 : public DenseOpticalFlow
+        {
+        public:
+            AlgorithmInfo* info() const;
+
+            Dual_TVL1();
+
+            void calc(InputArray frame0, InputArray frame1, OutputArray flow1, OutputArray flow2);
+            void collectGarbage();
+
+            double tau;
+            double lambda;
+            double theta;
+            int    nscales;
+            int    warps;
+            double epsilon;
+            int iterations;
+            bool useInitialFlow;
+
+        private:
+            void call(const Mat& input0, const Mat& input1, OutputArray dst);
+
+            OpticalFlowDual_TVL1 alg;
+            Mat buf[6];
+            Mat flow;
+            std::vector<Mat> flows;
+        };
+
         class SUPER_RESOLUTION_EXPORT Brox_GPU : public DenseOpticalFlow
         {
         public:
@@ -172,6 +200,33 @@ namespace cv
             void call(const gpu::GpuMat& input0, const gpu::GpuMat& input1, gpu::GpuMat& dst1, gpu::GpuMat& dst2);
 
             gpu::FarnebackOpticalFlow alg;
+            gpu::GpuMat buf[6];
+            gpu::GpuMat u, v, flow;
+        };
+
+        class SUPER_RESOLUTION_EXPORT Dual_TVL1_GPU : public DenseOpticalFlow
+        {
+        public:
+            AlgorithmInfo* info() const;
+
+            Dual_TVL1_GPU();
+
+            void calc(InputArray frame0, InputArray frame1, OutputArray flow1, OutputArray flow2);
+            void collectGarbage();
+
+            double tau;
+            double lambda;
+            double theta;
+            int    nscales;
+            int    warps;
+            double epsilon;
+            int iterations;
+            bool useInitialFlow;
+
+        private:
+            void call(const gpu::GpuMat& input0, const gpu::GpuMat& input1, gpu::GpuMat& dst1, gpu::GpuMat& dst2);
+
+            gpu::OpticalFlowDual_TVL1_GPU alg;
             gpu::GpuMat buf[6];
             gpu::GpuMat u, v, flow;
         };

@@ -58,6 +58,16 @@ namespace cv
                           obj.info()->addParam(obj, "upscaleSigmaColor", obj.upscaleSigmaColor);
                           obj.info()->addParam(obj, "speedUpThr", obj.speedUpThr));
 
+        CV_INIT_ALGORITHM(Dual_TVL1, "DenseOpticalFlow.Dual_TVL1",
+                          obj.info()->addParam(obj, "tau", obj.tau);
+                          obj.info()->addParam(obj, "lambda", obj.lambda);
+                          obj.info()->addParam(obj, "theta", obj.theta);
+                          obj.info()->addParam(obj, "nscales", obj.nscales);
+                          obj.info()->addParam(obj, "warps", obj.warps);
+                          obj.info()->addParam(obj, "epsilon", obj.epsilon);
+                          obj.info()->addParam(obj, "iterations", obj.iterations);
+                          obj.info()->addParam(obj, "useInitialFlow", obj.useInitialFlow));
+
         CV_INIT_ALGORITHM(Brox_GPU, "DenseOpticalFlow.Brox_GPU",
                           obj.info()->addParam(obj, "alpha", obj.alpha, false, 0, 0, "Flow smoothness");
                           obj.info()->addParam(obj, "gamma", obj.gamma, false, 0, 0, "Gradient constancy importance");
@@ -103,6 +113,16 @@ namespace cv
                           obj.info()->addParam(obj, "blurSigma", obj.blurSigma, false, 0, 0, "Gaussian blur sigma.");
                           obj.info()->addParam(obj, "temporalAreaRadius", obj.temporalAreaRadius, false, 0, 0, "Radius of the temporal search area.");
                           obj.info()->addParam<DenseOpticalFlow>(obj, "opticalFlow", obj.opticalFlow, false, 0, 0, "Dense optical flow algorithm."));
+
+        CV_INIT_ALGORITHM(Dual_TVL1_GPU, "DenseOpticalFlow.Dual_TVL1_GPU",
+                          obj.info()->addParam(obj, "tau", obj.tau);
+                          obj.info()->addParam(obj, "lambda", obj.lambda);
+                          obj.info()->addParam(obj, "theta", obj.theta);
+                          obj.info()->addParam(obj, "nscales", obj.nscales);
+                          obj.info()->addParam(obj, "warps", obj.warps);
+                          obj.info()->addParam(obj, "epsilon", obj.epsilon);
+                          obj.info()->addParam(obj, "iterations", obj.iterations);
+                          obj.info()->addParam(obj, "useInitialFlow", obj.useInitialFlow));
     }
 }
 
@@ -112,9 +132,11 @@ bool cv::superres::initModule_superres()
 
     all &= !Farneback_info_auto.name().empty();
     all &= !Simple_info_auto.name().empty();
+    all &= !Dual_TVL1_info_auto.name().empty();
     all &= !Brox_GPU_info_auto.name().empty();
     all &= !PyrLK_GPU_info_auto.name().empty();
     all &= !Farneback_GPU_info_auto.name().empty();
+    all &= !Dual_TVL1_GPU_info_auto.name().empty();
 
     all &= !BTV_L1_info_auto.name().empty();
     all &= !BTV_L1_GPU_info_auto.name().empty();
