@@ -32,6 +32,7 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include "super_resolution.hpp"
+#include "optical_flow.hpp"
 
 using namespace std;
 using namespace cv;
@@ -202,13 +203,13 @@ namespace
 int main(int argc, const char* argv[])
 {
     CommandLineParser cmd(argc, argv,
-        "{ @0           | car.avi   | Input video }"
-        "{ s scale      | 4         | Scale factor }"
-        "{ i iterations | 180       | Iteration count }"
-        "{ t temporal   | 4         | Radius of the temporal search area }"
-        "{ f opt-flow   | farneback | Optical flow algorithm (farneback, simple, tvl1, brox, pyrlk) }"
-        "{ gpu          |           | Use GPU }"
-        "{ h help       |           | Print help message }"
+        "{ @0           | car.avi | Input video }"
+        "{ s scale      | 4       | Scale factor }"
+        "{ i iterations | 180     | Iteration count }"
+        "{ t temporal   | 4       | Radius of the temporal search area }"
+        "{ f opt-flow   | tvl1    | Optical flow algorithm (farneback, simple, tvl1, brox, pyrlk) }"
+        "{ gpu          |         | Use GPU }"
+        "{ h help       |         | Print help message }"
     );
 
     if (cmd.has("help"))
@@ -235,23 +236,23 @@ int main(int argc, const char* argv[])
     if (optFlow == "farneback")
     {
         if (useGpu)
-            optFlowAlg = new Farneback_GPU;
+            optFlowAlg = createOptFlowFarneback_GPU();
         else
-            optFlowAlg = new Farneback;
+            optFlowAlg = createOptFlowFarneback();
     }
     else if (optFlow == "simple")
-        optFlowAlg = new Simple;
+        optFlowAlg = createOptFlowSimple();
     else if (optFlow == "tvl1")
     {
         if (useGpu)
-            optFlowAlg = new Dual_TVL1_GPU;
+            optFlowAlg = createOptFlowDualTVL1_GPU();
         else
-            optFlowAlg = new Dual_TVL1;
+            optFlowAlg = createOptFlowDualTVL1();
     }
     else if (optFlow == "brox")
-        optFlowAlg = new Brox_GPU;
+        optFlowAlg = createOptFlowBrox_GPU();
     else if (optFlow == "pyrlk")
-        optFlowAlg = new PyrLK_GPU;
+        optFlowAlg = createOptFlowPyrLK_GPU();
     else
     {
         cerr << "Incorrect Optical Flow algorithm - " << optFlow << endl;
@@ -261,9 +262,9 @@ int main(int argc, const char* argv[])
 
     Ptr<SuperResolution> superRes;
     if (useGpu)
-        superRes = new BTV_L1_GPU;
+        superRes = createSuperResBTVL1_GPU();
     else
-        superRes = new BTV_L1;
+        superRes = createSuperResBTVL1();
 
     const int btvKernelSize = superRes->getInt("btvKernelSize");
     Rect inner;

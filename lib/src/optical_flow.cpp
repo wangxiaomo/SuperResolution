@@ -24,6 +24,9 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "optical_flow.hpp"
+#include <opencv2/video/tracking.hpp>
+#include <opencv2/gpu/gpu.hpp>
+#include <opencv2/core/internal.hpp>
 #include "input_array_utility.hpp"
 
 using namespace std;
@@ -31,484 +34,641 @@ using namespace cv;
 using namespace cv::gpu;
 using namespace cv::superres;
 
-void cv::superres::DenseOpticalFlow::collectGarbage()
+///////////////////////////////////////////////////////////////////
+// CpuOpticalFlow
+
+namespace
 {
+    class CpuOpticalFlow : public DenseOpticalFlow
+    {
+    public:
+        explicit CpuOpticalFlow(int work_type);
+
+        void calc(InputArray frame0, InputArray frame1, OutputArray flow1, OutputArray flow2);
+        void collectGarbage();
+
+    protected:
+        virtual void call(const Mat& input0, const Mat& input1, OutputArray dst) = 0;
+
+    private:
+        int work_type;
+        Mat buf[6];
+        Mat flow;
+        Mat flows[2];
+    };
+
+    CpuOpticalFlow::CpuOpticalFlow(int _work_type) : work_type(_work_type)
+    {
+    }
+
+    void CpuOpticalFlow::calc(InputArray _frame0, InputArray _frame1, OutputArray _flow1, OutputArray _flow2)
+    {
+        Mat frame0 = ::getMat(_frame0, buf[0]);
+        Mat frame1 = ::getMat(_frame1, buf[1]);
+
+        CV_DbgAssert( frame1.type() == frame0.type() );
+        CV_DbgAssert( frame1.size() == frame0.size() );
+
+        Mat input0 = ::convertToType(frame0, work_type, buf[2], buf[3]);
+        Mat input1 = ::convertToType(frame1, work_type, buf[4], buf[5]);
+
+        if (!_flow2.needed() && _flow1.kind() != _InputArray::GPU_MAT)
+        {
+            call(input0, input1, _flow1);
+            return;
+        }
+
+        call(input0, input1, flow);
+
+        if (!_flow2.needed())
+        {
+            ::copy(flow, _flow1);
+        }
+        else
+        {
+            split(flow, flows);
+
+            ::copy(flows[0], _flow1);
+            ::copy(flows[1], _flow2);
+        }
+    }
+
+    void CpuOpticalFlow::collectGarbage()
+    {
+        for (int i = 0; i < 6; ++i)
+            buf[i].release();
+        flow.release();
+        flows[0].release();
+        flows[1].release();
+    }
 }
 
 ///////////////////////////////////////////////////////////////////
 // Farneback
 
-cv::superres::Farneback::Farneback()
+namespace
 {
-    pyrScale = 0.5;
-    numLevels = 5;
-    winSize = 13;
-    numIters = 10;
-    polyN = 5;
-    polySigma = 1.1;
-    flags = 0;
-}
-
-void cv::superres::Farneback::calc(InputArray _frame0, InputArray _frame1, OutputArray _flow1, OutputArray _flow2)
-{
-    Mat frame0 = ::getMat(_frame0, buf[0]);
-    Mat frame1 = ::getMat(_frame1, buf[1]);
-
-    CV_DbgAssert( frame1.type() == frame0.type() );
-    CV_DbgAssert( frame1.size() == frame0.size() );
-
-    Mat input0 = ::convertToType(frame0, CV_8U, 1, buf[2], buf[3]);
-    Mat input1 = ::convertToType(frame1, CV_8U, 1, buf[4], buf[5]);
-
-    if (!_flow2.needed() && _flow1.kind() != _InputArray::GPU_MAT)
+    class Farneback : public CpuOpticalFlow
     {
-        call(input0, input1, _flow1);
-        return;
+    public:
+        AlgorithmInfo* info() const;
+
+        Farneback();
+
+    protected:
+        void call(const Mat& input0, const Mat& input1, OutputArray dst);
+
+    private:
+        double pyrScale;
+        int numLevels;
+        int winSize;
+        int numIters;
+        int polyN;
+        double polySigma;
+        int flags;
+    };
+
+    CV_INIT_ALGORITHM(Farneback, "DenseOpticalFlow.Farneback",
+                      obj.info()->addParam(obj, "pyrScale", obj.pyrScale);
+                      obj.info()->addParam(obj, "numLevels", obj.numLevels);
+                      obj.info()->addParam(obj, "winSize", obj.winSize);
+                      obj.info()->addParam(obj, "numIters", obj.numIters);
+                      obj.info()->addParam(obj, "polyN", obj.polyN);
+                      obj.info()->addParam(obj, "polySigma", obj.polySigma);
+                      obj.info()->addParam(obj, "flags", obj.flags));
+
+    Farneback::Farneback() : CpuOpticalFlow(CV_8UC1)
+    {
+        pyrScale = 0.5;
+        numLevels = 5;
+        winSize = 13;
+        numIters = 10;
+        polyN = 5;
+        polySigma = 1.1;
+        flags = 0;
     }
 
-    call(input0, input1, flow);
-
-    if (!_flow2.needed())
+    void Farneback::call(const Mat& input0, const Mat& input1, OutputArray dst)
     {
-        ::copy(_flow1, flow);
-    }
-    else
-    {
-        split(flow, flows);
-
-        ::copy(_flow1, flows[0]);
-        ::copy(_flow2, flows[1]);
+        calcOpticalFlowFarneback(input0, input1, dst, pyrScale, numLevels, winSize, numIters, polyN, polySigma, flags);
     }
 }
 
-void cv::superres::Farneback::call(const Mat& input0, const Mat& input1, OutputArray dst)
+Ptr<DenseOpticalFlow> cv::superres::createOptFlowFarneback()
 {
-    calcOpticalFlowFarneback(input0, input1, dst, pyrScale, numLevels, winSize, numIters, polyN, polySigma, flags);
-}
-
-void cv::superres::Farneback::collectGarbage()
-{
-    for (int i = 0; i < 6; ++i)
-        buf[i].release();
-    flow.release();
-    flows.clear();
+    return new Farneback;
 }
 
 ///////////////////////////////////////////////////////////////////
 // Simple
 
-cv::superres::Simple::Simple()
+namespace
 {
-    layers = 3;
-    averagingBlockSize = 2;
-    maxFlow = 4;
-    sigmaDist = 4.1;
-    sigmaColor = 25.5;
-    postProcessWindow = 18;
-    sigmaDistFix = 55.0;
-    sigmaColorFix = 25.5;
-    occThr = 0.35;
-    upscaleAveragingRadius = 18;
-    upscaleSigmaDist = 55.0;
-    upscaleSigmaColor = 25.5;
-    speedUpThr = 10;
-}
-
-void cv::superres::Simple::calc(InputArray _frame0, InputArray _frame1, OutputArray _flow1, OutputArray _flow2)
-{
-    Mat frame0 = ::getMat(_frame0, buf[0]);
-    Mat frame1 = ::getMat(_frame1, buf[1]);
-
-    CV_DbgAssert( frame1.type() == frame0.type() );
-    CV_DbgAssert( frame1.size() == frame0.size() );
-
-    Mat input0 = ::convertToType(frame0, CV_8U, 3, buf[2], buf[3]);
-    Mat input1 = ::convertToType(frame1, CV_8U, 3, buf[4], buf[5]);
-
-    if (!_flow2.needed() && _flow1.kind() == _InputArray::MAT)
+    class Simple : public CpuOpticalFlow
     {
-        call(input0, input1, _flow1.getMatRef());
-        return;
+    public:
+        AlgorithmInfo* info() const;
+
+        Simple();
+
+    protected:
+        void call(const Mat& input0, const Mat& input1, OutputArray dst);
+
+    private:
+        int layers;
+        int averagingBlockSize;
+        int maxFlow;
+        double sigmaDist;
+        double sigmaColor;
+        int postProcessWindow;
+        double sigmaDistFix;
+        double sigmaColorFix;
+        double occThr;
+        int upscaleAveragingRadius;
+        double upscaleSigmaDist;
+        double upscaleSigmaColor;
+        double speedUpThr;
+    };
+
+    CV_INIT_ALGORITHM(Simple, "DenseOpticalFlow.Simple",
+                      obj.info()->addParam(obj, "layers", obj.layers);
+                      obj.info()->addParam(obj, "averagingBlockSize", obj.averagingBlockSize);
+                      obj.info()->addParam(obj, "maxFlow", obj.maxFlow);
+                      obj.info()->addParam(obj, "sigmaDist", obj.sigmaDist);
+                      obj.info()->addParam(obj, "sigmaColor", obj.sigmaColor);
+                      obj.info()->addParam(obj, "postProcessWindow", obj.postProcessWindow);
+                      obj.info()->addParam(obj, "sigmaDistFix", obj.sigmaDistFix);
+                      obj.info()->addParam(obj, "sigmaColorFix", obj.sigmaColorFix);
+                      obj.info()->addParam(obj, "occThr", obj.occThr);
+                      obj.info()->addParam(obj, "upscaleAveragingRadius", obj.upscaleAveragingRadius);
+                      obj.info()->addParam(obj, "upscaleSigmaDist", obj.upscaleSigmaDist);
+                      obj.info()->addParam(obj, "upscaleSigmaColor", obj.upscaleSigmaColor);
+                      obj.info()->addParam(obj, "speedUpThr", obj.speedUpThr));
+
+    Simple::Simple() : CpuOpticalFlow(CV_8UC3)
+    {
+        layers = 3;
+        averagingBlockSize = 2;
+        maxFlow = 4;
+        sigmaDist = 4.1;
+        sigmaColor = 25.5;
+        postProcessWindow = 18;
+        sigmaDistFix = 55.0;
+        sigmaColorFix = 25.5;
+        occThr = 0.35;
+        upscaleAveragingRadius = 18;
+        upscaleSigmaDist = 55.0;
+        upscaleSigmaColor = 25.5;
+        speedUpThr = 10;
     }
 
-    call(input0, input1, flow);
-
-    if (!_flow2.needed())
+    void Simple::call(const Mat& input0, const Mat& input1, OutputArray dst)
     {
-        ::copy(_flow1, flow);
-    }
-    else
-    {
-        split(flow, flows);
-
-        ::copy(_flow1, flows[0]);
-        ::copy(_flow2, flows[1]);
+        calcOpticalFlowSF(input0, input1, dst,
+                          layers,
+                          averagingBlockSize,
+                          maxFlow,
+                          sigmaDist,
+                          sigmaColor,
+                          postProcessWindow,
+                          sigmaDistFix,
+                          sigmaColorFix,
+                          occThr,
+                          upscaleAveragingRadius,
+                          upscaleSigmaDist,
+                          upscaleSigmaColor,
+                          speedUpThr);
     }
 }
 
-void cv::superres::Simple::call(Mat input0, Mat input1, Mat& dst)
+Ptr<DenseOpticalFlow> cv::superres::createOptFlowSimple()
 {
-    calcOpticalFlowSF(input0, input1, dst,
-                      layers,
-                      averagingBlockSize,
-                      maxFlow,
-                      sigmaDist,
-                      sigmaColor,
-                      postProcessWindow,
-                      sigmaDistFix,
-                      sigmaColorFix,
-                      occThr,
-                      upscaleAveragingRadius,
-                      upscaleSigmaDist,
-                      upscaleSigmaColor,
-                      speedUpThr);
-
-}
-
-void cv::superres::Simple::collectGarbage()
-{
-    for (int i = 0; i < 6; ++i)
-        buf[i].release();
-    flow.release();
-    flows.clear();
+    return new Simple;
 }
 
 ///////////////////////////////////////////////////////////////////
-// Dual_TVL1
+// DualTVL1
 
-cv::superres::Dual_TVL1::Dual_TVL1()
+namespace
 {
-    tau = alg.tau;
-    lambda = alg.lambda;
-    theta = alg.theta;
-    nscales = alg.nscales;
-    warps = alg.warps;
-    epsilon = alg.epsilon;
-    iterations = alg.iterations;
-    useInitialFlow = alg.useInitialFlow;
-}
-
-void cv::superres::Dual_TVL1::calc(InputArray _frame0, InputArray _frame1, OutputArray _flow1, OutputArray _flow2)
-{
-    Mat frame0 = ::getMat(_frame0, buf[0]);
-    Mat frame1 = ::getMat(_frame1, buf[1]);
-
-    CV_DbgAssert( frame1.type() == frame0.type() );
-    CV_DbgAssert( frame1.size() == frame0.size() );
-
-    Mat input0 = ::convertToType(frame0, CV_8U, 1, buf[2], buf[3]);
-    Mat input1 = ::convertToType(frame1, CV_8U, 1, buf[4], buf[5]);
-
-    if (!_flow2.needed() && _flow1.kind() != _InputArray::GPU_MAT)
+    class DualTVL1 : public CpuOpticalFlow
     {
-        call(input0, input1, _flow1);
-        return;
+    public:
+        AlgorithmInfo* info() const;
+
+        DualTVL1();
+
+        void collectGarbage();
+
+    protected:
+        void call(const Mat& input0, const Mat& input1, OutputArray dst);
+
+    private:
+        double tau;
+        double lambda;
+        double theta;
+        int    nscales;
+        int    warps;
+        double epsilon;
+        int iterations;
+        bool useInitialFlow;
+
+        OpticalFlowDual_TVL1 alg;
+    };
+
+    CV_INIT_ALGORITHM(DualTVL1, "DenseOpticalFlow.DualTVL1",
+                      obj.info()->addParam(obj, "tau", obj.tau);
+                      obj.info()->addParam(obj, "lambda", obj.lambda);
+                      obj.info()->addParam(obj, "theta", obj.theta);
+                      obj.info()->addParam(obj, "nscales", obj.nscales);
+                      obj.info()->addParam(obj, "warps", obj.warps);
+                      obj.info()->addParam(obj, "epsilon", obj.epsilon);
+                      obj.info()->addParam(obj, "iterations", obj.iterations);
+                      obj.info()->addParam(obj, "useInitialFlow", obj.useInitialFlow));
+
+    DualTVL1::DualTVL1() : CpuOpticalFlow(CV_8UC1)
+    {
+        tau = alg.tau;
+        lambda = alg.lambda;
+        theta = alg.theta;
+        nscales = alg.nscales;
+        warps = alg.warps;
+        epsilon = alg.epsilon;
+        iterations = alg.iterations;
+        useInitialFlow = alg.useInitialFlow;
     }
 
-    call(input0, input1, flow);
-
-    if (!_flow2.needed())
+    void DualTVL1::call(const Mat& input0, const Mat& input1, OutputArray dst)
     {
-        ::copy(_flow1, flow);
+        alg.tau = tau;
+        alg.lambda = lambda;
+        alg.theta = theta;
+        alg.nscales = nscales;
+        alg.warps = warps;
+        alg.epsilon = epsilon;
+        alg.iterations = iterations;
+        alg.useInitialFlow = useInitialFlow;
+
+        alg(input0, input1, dst);
     }
-    else
-    {
-        split(flow, flows);
 
-        ::copy(_flow1, flows[0]);
-        ::copy(_flow2, flows[1]);
+    void DualTVL1::collectGarbage()
+    {
+        alg.collectGarbage();
+        CpuOpticalFlow::collectGarbage();
     }
 }
 
-void cv::superres::Dual_TVL1::call(const Mat& input0, const Mat& input1, OutputArray dst)
+Ptr<DenseOpticalFlow> cv::superres::createOptFlowDualTVL1()
 {
-    alg.tau = tau;
-    alg.lambda = lambda;
-    alg.theta = theta;
-    alg.nscales = nscales;
-    alg.warps = warps;
-    alg.epsilon = epsilon;
-    alg.iterations = iterations;
-    alg.useInitialFlow = useInitialFlow;
-
-    alg(input0, input1, dst);
+    return new DualTVL1;
 }
 
-void cv::superres::Dual_TVL1::collectGarbage()
+///////////////////////////////////////////////////////////////////
+// GpuOpticalFlow
+
+namespace
 {
-    for (int i = 0; i < 6; ++i)
-        buf[i].release();
-    flow.release();
-    flows.clear();
-    alg.collectGarbage();
+    class GpuOpticalFlow : public DenseOpticalFlow
+    {
+    public:
+        explicit GpuOpticalFlow(int work_type);
+
+        void calc(InputArray frame0, InputArray frame1, OutputArray flow1, OutputArray flow2);
+        void collectGarbage();
+
+    protected:
+        virtual void call(const GpuMat& input0, const GpuMat& input1, GpuMat& dst1, GpuMat& dst2) = 0;
+
+    private:
+        int work_type;
+        GpuMat buf[6];
+        GpuMat u, v, flow;
+    };
+
+    GpuOpticalFlow::GpuOpticalFlow(int _work_type) : work_type(_work_type)
+    {
+    }
+
+    void GpuOpticalFlow::calc(InputArray _frame0, InputArray _frame1, OutputArray _flow1, OutputArray _flow2)
+    {
+        GpuMat frame0 = ::getGpuMat(_frame0, buf[0]);
+        GpuMat frame1 = ::getGpuMat(_frame1, buf[1]);
+
+        CV_DbgAssert( frame1.type() == frame0.type() );
+        CV_DbgAssert( frame1.size() == frame0.size() );
+
+        GpuMat input0 = ::convertToType(frame0, work_type, buf[2], buf[3]);
+        GpuMat input1 = ::convertToType(frame1, work_type, buf[4], buf[5]);
+
+        if (_flow2.needed() && _flow1.kind() == _InputArray::GPU_MAT && _flow2.kind() == _InputArray::GPU_MAT)
+        {
+            call(input0, input1, _flow1.getGpuMatRef(), _flow2.getGpuMatRef());
+            return;
+        }
+
+        call(input0, input1, u, v);
+
+        if (_flow2.needed())
+        {
+            ::copy(u, _flow1);
+            ::copy(v, _flow2);
+        }
+        else
+        {
+            GpuMat src[] = {u, v};
+            merge(src, 2, flow);
+            ::copy(flow, _flow1);
+        }
+    }
+
+    void GpuOpticalFlow::collectGarbage()
+    {
+        for (int i = 0; i < 6; ++i)
+            buf[i].release();
+        u.release();
+        v.release();
+        flow.release();
+    }
 }
 
 ///////////////////////////////////////////////////////////////////
 // Brox_GPU
 
-cv::superres::Brox_GPU::Brox_GPU() : alg(0.197, 50.0, 0.8, 10, 77, 10)
+namespace
 {
-    alpha = alg.alpha;
-    gamma = alg.gamma;
-    scaleFactor = alg.scale_factor;
-    innerIterations = alg.inner_iterations;
-    outerIterations = alg.outer_iterations;
-    solverIterations = alg.solver_iterations;
-}
-
-void cv::superres::Brox_GPU::calc(InputArray _frame0, InputArray _frame1, OutputArray _flow1, OutputArray _flow2)
-{
-    GpuMat frame0 = ::getGpuMat(_frame0, buf[0]);
-    GpuMat frame1 = ::getGpuMat(_frame1, buf[1]);
-
-    CV_DbgAssert( frame1.type() == frame0.type() );
-    CV_DbgAssert( frame1.size() == frame0.size() );
-
-    GpuMat input0 = ::convertToType(frame0, CV_32F, 1, buf[2], buf[3]);
-    GpuMat input1 = ::convertToType(frame1, CV_32F, 1, buf[4], buf[5]);
-
-    if (_flow2.needed() && _flow1.kind() == _InputArray::GPU_MAT && _flow2.kind() == _InputArray::GPU_MAT)
+    class Brox_GPU : public GpuOpticalFlow
     {
-        call(input0, input1, _flow1.getGpuMatRef(), _flow2.getGpuMatRef());
-        return;
+    public:
+        AlgorithmInfo* info() const;
+
+        Brox_GPU();
+
+        void collectGarbage();
+
+    protected:
+        void call(const gpu::GpuMat& input0, const gpu::GpuMat& input1, gpu::GpuMat& dst1, gpu::GpuMat& dst2);
+
+    private:
+        double alpha;
+        double gamma;
+        double scaleFactor;
+        int innerIterations;
+        int outerIterations;
+        int solverIterations;
+
+        BroxOpticalFlow alg;
+    };
+
+    CV_INIT_ALGORITHM(Brox_GPU, "DenseOpticalFlow.Brox_GPU",
+                      obj.info()->addParam(obj, "alpha", obj.alpha, false, 0, 0, "Flow smoothness");
+                      obj.info()->addParam(obj, "gamma", obj.gamma, false, 0, 0, "Gradient constancy importance");
+                      obj.info()->addParam(obj, "scaleFactor", obj.scaleFactor, false, 0, 0, "Pyramid scale factor");
+                      obj.info()->addParam(obj, "innerIterations", obj.innerIterations, false, 0, 0, "Number of lagged non-linearity iterations (inner loop)");
+                      obj.info()->addParam(obj, "outerIterations", obj.outerIterations, false, 0, 0, "Number of warping iterations (number of pyramid levels)");
+                      obj.info()->addParam(obj, "solverIterations", obj.solverIterations, false, 0, 0, "Number of linear system solver iterations"));
+
+    Brox_GPU::Brox_GPU() : GpuOpticalFlow(CV_32FC1), alg(0.197, 50.0, 0.8, 10, 77, 10)
+    {
+        alpha = alg.alpha;
+        gamma = alg.gamma;
+        scaleFactor = alg.scale_factor;
+        innerIterations = alg.inner_iterations;
+        outerIterations = alg.outer_iterations;
+        solverIterations = alg.solver_iterations;
     }
 
-    call(input0, input1, u, v);
+    void Brox_GPU::call(const GpuMat& input0, const GpuMat& input1, GpuMat& dst1, GpuMat& dst2)
+    {
+        alg.alpha = alpha;
+        alg.gamma = gamma;
+        alg.scale_factor = scaleFactor;
+        alg.inner_iterations = innerIterations;
+        alg.outer_iterations = outerIterations;
+        alg.solver_iterations = solverIterations;
 
-    if (_flow2.needed())
-    {
-        ::copy(_flow1, u);
-        ::copy(_flow2, v);
+        alg(input0, input1, dst1, dst2);
     }
-    else
+
+    void Brox_GPU::collectGarbage()
     {
-        GpuMat src[] = {u, v};
-        gpu::merge(src, 2, flow);
-        ::copy(_flow1, flow);
+        alg.buf.release();
+        GpuOpticalFlow::collectGarbage();
     }
 }
 
-void cv::superres::Brox_GPU::call(const GpuMat& input0, const GpuMat& input1, GpuMat& dst1, GpuMat& dst2)
+Ptr<DenseOpticalFlow> cv::superres::createOptFlowBrox_GPU()
 {
-    alg.alpha = alpha;
-    alg.gamma = gamma;
-    alg.scale_factor = scaleFactor;
-    alg.inner_iterations = innerIterations;
-    alg.outer_iterations = outerIterations;
-    alg.solver_iterations = solverIterations;
-
-    alg(input0, input1, dst1, dst2);
-}
-
-void cv::superres::Brox_GPU::collectGarbage()
-{
-    alg.buf.release();
-    for (int i = 0; i < 6; ++i)
-        buf[i].release();
-    u.release();
-    v.release();
-    flow.release();
+    return new Brox_GPU;
 }
 
 ///////////////////////////////////////////////////////////////////
 // PyrLK_GPU
 
-cv::superres::PyrLK_GPU::PyrLK_GPU()
+namespace
 {
-    winSize = alg.winSize.width;
-    maxLevel = alg.maxLevel;
-    iterations = alg.iters;
-}
-
-void cv::superres::PyrLK_GPU::calc(InputArray _frame0, InputArray _frame1, OutputArray _flow1, OutputArray _flow2)
-{
-    GpuMat frame0 = ::getGpuMat(_frame0, buf[0]);
-    GpuMat frame1 = ::getGpuMat(_frame1, buf[1]);
-
-    CV_DbgAssert( frame1.type() == frame0.type() );
-    CV_DbgAssert( frame1.size() == frame0.size() );
-
-    GpuMat input0 = ::convertToType(frame0, CV_8U, 1, buf[2], buf[3]);
-    GpuMat input1 = ::convertToType(frame1, CV_8U, 1, buf[4], buf[5]);
-
-    if (_flow2.needed() && _flow1.kind() == _InputArray::GPU_MAT && _flow2.kind() == _InputArray::GPU_MAT)
+    class PyrLK_GPU : public GpuOpticalFlow
     {
-        call(input0, input1, _flow1.getGpuMatRef(), _flow2.getGpuMatRef());
-        return;
+    public:
+        AlgorithmInfo* info() const;
+
+        PyrLK_GPU();
+
+        void collectGarbage();
+
+    protected:
+        void call(const gpu::GpuMat& input0, const gpu::GpuMat& input1, gpu::GpuMat& dst1, gpu::GpuMat& dst2);
+
+    private:
+        int winSize;
+        int maxLevel;
+        int iterations;
+
+        PyrLKOpticalFlow alg;
+    };
+
+    CV_INIT_ALGORITHM(PyrLK_GPU, "DenseOpticalFlow.PyrLK_GPU",
+                      obj.info()->addParam(obj, "winSize", obj.winSize);
+                      obj.info()->addParam(obj, "maxLevel", obj.maxLevel);
+                      obj.info()->addParam(obj, "iterations", obj.iterations));
+
+    PyrLK_GPU::PyrLK_GPU() : GpuOpticalFlow(CV_8UC1)
+    {
+        winSize = alg.winSize.width;
+        maxLevel = alg.maxLevel;
+        iterations = alg.iters;
     }
 
-    call(input0, input1, u, v);
+    void PyrLK_GPU::call(const GpuMat& input0, const GpuMat& input1, GpuMat& dst1, GpuMat& dst2)
+    {
+        alg.winSize.width = winSize;
+        alg.winSize.height = winSize;
+        alg.maxLevel = maxLevel;
+        alg.iters = iterations;
 
-    if (_flow2.needed())
-    {
-        ::copy(_flow1, u);
-        ::copy(_flow2, v);
+        alg.dense(input0, input1, dst1, dst2);
     }
-    else
+
+    void PyrLK_GPU::collectGarbage()
     {
-        GpuMat src[] = {u, v};
-        gpu::merge(src, 2, flow);
-        ::copy(_flow1, flow);
+        alg.releaseMemory();
+        GpuOpticalFlow::collectGarbage();
     }
 }
 
-void cv::superres::PyrLK_GPU::call(const GpuMat& input0, const GpuMat& input1, GpuMat& dst1, GpuMat& dst2)
+Ptr<DenseOpticalFlow> cv::superres::createOptFlowPyrLK_GPU()
 {
-    alg.winSize.width = winSize;
-    alg.winSize.height = winSize;
-    alg.maxLevel = maxLevel;
-    alg.iters = iterations;
-
-    alg.dense(input0, input1, dst1, dst2);
-}
-
-void cv::superres::PyrLK_GPU::collectGarbage()
-{
-    alg.releaseMemory();
-    for (int i = 0; i < 6; ++i)
-        buf[i].release();
-    u.release();
-    v.release();
-    flow.release();
+    return new PyrLK_GPU;
 }
 
 ///////////////////////////////////////////////////////////////////
 // Farneback_GPU
 
-cv::superres::Farneback_GPU::Farneback_GPU()
+namespace
 {
-    pyrScale = alg.pyrScale;
-    numLevels = alg.numLevels;
-    winSize = alg.winSize;
-    numIters = alg.numIters;
-    polyN = alg.polyN;
-    polySigma = alg.polySigma;
-    flags = alg.flags;
-}
-
-void cv::superres::Farneback_GPU::calc(InputArray _frame0, InputArray _frame1, OutputArray _flow1, OutputArray _flow2)
-{
-    GpuMat frame0 = ::getGpuMat(_frame0, buf[0]);
-    GpuMat frame1 = ::getGpuMat(_frame1, buf[1]);
-
-    CV_DbgAssert( frame1.type() == frame0.type() );
-    CV_DbgAssert( frame1.size() == frame0.size() );
-
-    GpuMat input0 = ::convertToType(frame0, CV_8U, 1, buf[2], buf[3]);
-    GpuMat input1 = ::convertToType(frame1, CV_8U, 1, buf[4], buf[5]);
-
-    if (_flow2.needed() && _flow1.kind() == _InputArray::GPU_MAT && _flow2.kind() == _InputArray::GPU_MAT)
+    class Farneback_GPU : public GpuOpticalFlow
     {
-        call(input0, input1, _flow1.getGpuMatRef(), _flow2.getGpuMatRef());
-        return;
+    public:
+        AlgorithmInfo* info() const;
+
+        Farneback_GPU();
+
+        void collectGarbage();
+
+    protected:
+        void call(const gpu::GpuMat& input0, const gpu::GpuMat& input1, gpu::GpuMat& dst1, gpu::GpuMat& dst2);
+
+    private:
+        double pyrScale;
+        int numLevels;
+        int winSize;
+        int numIters;
+        int polyN;
+        double polySigma;
+        int flags;
+
+        FarnebackOpticalFlow alg;
+    };
+
+    CV_INIT_ALGORITHM(Farneback_GPU, "DenseOpticalFlow.Farneback_GPU",
+                      obj.info()->addParam(obj, "pyrScale", obj.pyrScale);
+                      obj.info()->addParam(obj, "numLevels", obj.numLevels);
+                      obj.info()->addParam(obj, "winSize", obj.winSize);
+                      obj.info()->addParam(obj, "numIters", obj.numIters);
+                      obj.info()->addParam(obj, "polyN", obj.polyN);
+                      obj.info()->addParam(obj, "polySigma", obj.polySigma);
+                      obj.info()->addParam(obj, "flags", obj.flags));
+
+    Farneback_GPU::Farneback_GPU() : GpuOpticalFlow(CV_8UC1)
+    {
+        pyrScale = alg.pyrScale;
+        numLevels = alg.numLevels;
+        winSize = alg.winSize;
+        numIters = alg.numIters;
+        polyN = alg.polyN;
+        polySigma = alg.polySigma;
+        flags = alg.flags;
     }
 
-    call(input0, input1, u, v);
+    void Farneback_GPU::call(const GpuMat& input0, const GpuMat& input1, GpuMat& dst1, GpuMat& dst2)
+    {
+        alg.pyrScale = pyrScale;
+        alg.numLevels = numLevels;
+        alg.winSize = winSize;
+        alg.numIters = numIters;
+        alg.polyN = polyN;
+        alg.polySigma = polySigma;
+        alg.flags = flags;
 
-    if (_flow2.needed())
-    {
-        ::copy(_flow1, u);
-        ::copy(_flow2, v);
+        alg(input0, input1, dst1, dst2);
     }
-    else
+
+    void Farneback_GPU::collectGarbage()
     {
-        GpuMat src[] = {u, v};
-        gpu::merge(src, 2, flow);
-        ::copy(_flow1, flow);
+        alg.releaseMemory();
+        GpuOpticalFlow::collectGarbage();
     }
 }
 
-void cv::superres::Farneback_GPU::call(const GpuMat& input0, const GpuMat& input1, GpuMat& dst1, GpuMat& dst2)
+Ptr<DenseOpticalFlow> cv::superres::createOptFlowFarneback_GPU()
 {
-    alg.pyrScale = pyrScale;
-    alg.numLevels = numLevels;
-    alg.winSize = winSize;
-    alg.numIters = numIters;
-    alg.polyN = polyN;
-    alg.polySigma = polySigma;
-    alg.flags = flags;
-
-    alg(input0, input1, dst1, dst2);
-}
-
-void cv::superres::Farneback_GPU::collectGarbage()
-{
-    alg.releaseMemory();
-    for (int i = 0; i < 6; ++i)
-        buf[i].release();
-    u.release();
-    v.release();
-    flow.release();
+    return new Farneback_GPU;
 }
 
 ///////////////////////////////////////////////////////////////////
-// Dual_TVL1_GPU
+// DualTVL1_GPU
 
-cv::superres::Dual_TVL1_GPU::Dual_TVL1_GPU()
+namespace
 {
-    tau = alg.tau;
-    lambda = alg.lambda;
-    theta = alg.theta;
-    nscales = alg.nscales;
-    warps = alg.warps;
-    epsilon = alg.epsilon;
-    iterations = alg.iterations;
-    useInitialFlow = alg.useInitialFlow;
-}
-
-void cv::superres::Dual_TVL1_GPU::calc(InputArray _frame0, InputArray _frame1, OutputArray _flow1, OutputArray _flow2)
-{
-    GpuMat frame0 = ::getGpuMat(_frame0, buf[0]);
-    GpuMat frame1 = ::getGpuMat(_frame1, buf[1]);
-
-    CV_DbgAssert( frame1.type() == frame0.type() );
-    CV_DbgAssert( frame1.size() == frame0.size() );
-
-    GpuMat input0 = ::convertToType(frame0, CV_8U, 1, buf[2], buf[3]);
-    GpuMat input1 = ::convertToType(frame1, CV_8U, 1, buf[4], buf[5]);
-
-    if (_flow2.needed() && _flow1.kind() == _InputArray::GPU_MAT && _flow2.kind() == _InputArray::GPU_MAT)
+    class DualTVL1_GPU : public GpuOpticalFlow
     {
-        call(input0, input1, _flow1.getGpuMatRef(), _flow2.getGpuMatRef());
-        return;
+    public:
+        AlgorithmInfo* info() const;
+
+        DualTVL1_GPU();
+
+        void collectGarbage();
+
+    protected:
+        void call(const gpu::GpuMat& input0, const gpu::GpuMat& input1, gpu::GpuMat& dst1, gpu::GpuMat& dst2);
+
+    private:
+        double tau;
+        double lambda;
+        double theta;
+        int    nscales;
+        int    warps;
+        double epsilon;
+        int iterations;
+        bool useInitialFlow;
+
+        OpticalFlowDual_TVL1_GPU alg;
+    };
+
+    CV_INIT_ALGORITHM(DualTVL1_GPU, "DenseOpticalFlow.DualTVL1_GPU",
+                      obj.info()->addParam(obj, "tau", obj.tau);
+                      obj.info()->addParam(obj, "lambda", obj.lambda);
+                      obj.info()->addParam(obj, "theta", obj.theta);
+                      obj.info()->addParam(obj, "nscales", obj.nscales);
+                      obj.info()->addParam(obj, "warps", obj.warps);
+                      obj.info()->addParam(obj, "epsilon", obj.epsilon);
+                      obj.info()->addParam(obj, "iterations", obj.iterations);
+                      obj.info()->addParam(obj, "useInitialFlow", obj.useInitialFlow));
+
+    DualTVL1_GPU::DualTVL1_GPU() : GpuOpticalFlow(CV_8UC1)
+    {
+        tau = alg.tau;
+        lambda = alg.lambda;
+        theta = alg.theta;
+        nscales = alg.nscales;
+        warps = alg.warps;
+        epsilon = alg.epsilon;
+        iterations = alg.iterations;
+        useInitialFlow = alg.useInitialFlow;
     }
 
-    call(input0, input1, u, v);
-
-    if (_flow2.needed())
+    void DualTVL1_GPU::call(const GpuMat& input0, const GpuMat& input1, GpuMat& dst1, GpuMat& dst2)
     {
-        ::copy(_flow1, u);
-        ::copy(_flow2, v);
+        alg.tau = tau;
+        alg.lambda = lambda;
+        alg.theta = theta;
+        alg.nscales = nscales;
+        alg.warps = warps;
+        alg.epsilon = epsilon;
+        alg.iterations = iterations;
+        alg.useInitialFlow = useInitialFlow;
+
+        alg(input0, input1, dst1, dst2);
     }
-    else
+
+    void DualTVL1_GPU::collectGarbage()
     {
-        GpuMat src[] = {u, v};
-        gpu::merge(src, 2, flow);
-        ::copy(_flow1, flow);
+        alg.collectGarbage();
+        GpuOpticalFlow::collectGarbage();
     }
 }
 
-void cv::superres::Dual_TVL1_GPU::call(const GpuMat& input0, const GpuMat& input1, GpuMat& dst1, GpuMat& dst2)
+Ptr<DenseOpticalFlow> cv::superres::createOptFlowDualTVL1_GPU()
 {
-    alg.tau = tau;
-    alg.lambda = lambda;
-    alg.theta = theta;
-    alg.nscales = nscales;
-    alg.warps = warps;
-    alg.epsilon = epsilon;
-    alg.iterations = iterations;
-    alg.useInitialFlow = useInitialFlow;
-
-    alg(input0, input1, dst1, dst2);
+    return new DualTVL1_GPU;
 }
-
-void cv::superres::Dual_TVL1_GPU::collectGarbage()
-{
-    alg.collectGarbage();
-    for (int i = 0; i < 6; ++i)
-        buf[i].release();
-    u.release();
-    v.release();
-    flow.release();
-}
-

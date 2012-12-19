@@ -31,11 +31,11 @@
 using namespace cv::gpu;
 using namespace cv::gpu::device;
 
-namespace
+namespace btv_l1_device
 {
-    __global__ void buildMotionMaps(const PtrStepSzf motionx, const PtrStepf motiony,
-                                    PtrStepf forwardx, PtrStepf forwardy,
-                                    PtrStepf backwardx, PtrStepf backwardy)
+    __global__ void buildMotionMapsKernel(const PtrStepSzf motionx, const PtrStepf motiony,
+                                          PtrStepf forwardx, PtrStepf forwardy,
+                                          PtrStepf backwardx, PtrStepf backwardy)
     {
         const int x = blockIdx.x * blockDim.x + threadIdx.x;
         const int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -52,26 +52,20 @@ namespace
         backwardx(y, x) = x + mx;
         backwardy(y, x) = y + my;
     }
-}
 
-namespace btv_l1_device
-{
     void buildMotionMaps(PtrStepSzf motionx, PtrStepSzf motiony, PtrStepSzf forwardx, PtrStepSzf forwardy, PtrStepSzf backwardx, PtrStepSzf backwardy)
     {
         const dim3 block(32, 8);
         const dim3 grid(divUp(motionx.cols, block.x), divUp(motionx.rows, block.y));
 
-        ::buildMotionMaps<<<grid, block>>>(motionx, motiony, forwardx, forwardy, backwardx, backwardy);
+        buildMotionMapsKernel<<<grid, block>>>(motionx, motiony, forwardx, forwardy, backwardx, backwardy);
         cudaSafeCall( cudaGetLastError() );
 
         cudaSafeCall( cudaDeviceSynchronize() );
     }
-}
 
-namespace
-{
     template <typename T>
-    __global__ void upscale(const PtrStepSz<T> src, PtrStep<T> dst, const int scale)
+    __global__ void upscaleKernel(const PtrStepSz<T> src, PtrStep<T> dst, const int scale)
     {
         const int x = blockIdx.x * blockDim.x + threadIdx.x;
         const int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -81,10 +75,7 @@ namespace
 
         dst(y * scale, x * scale) = src(y, x);
     }
-}
 
-namespace btv_l1_device
-{
     template <int cn>
     void upscale(const PtrStepSzb src, PtrStepSzb dst, int scale, cudaStream_t stream)
     {
@@ -93,7 +84,7 @@ namespace btv_l1_device
         const dim3 block(32, 8);
         const dim3 grid(divUp(src.cols, block.x), divUp(src.rows, block.y));
 
-        ::upscale<src_t><<<grid, block, 0, stream>>>((PtrStepSz<src_t>) src, (PtrStepSz<src_t>) dst, scale);
+        upscaleKernel<src_t><<<grid, block, 0, stream>>>((PtrStepSz<src_t>) src, (PtrStepSz<src_t>) dst, scale);
         cudaSafeCall( cudaGetLastError() );
 
         if (stream == 0)
@@ -103,10 +94,7 @@ namespace btv_l1_device
     template void upscale<1>(const PtrStepSzb src, PtrStepSzb dst, int scale, cudaStream_t stream);
     template void upscale<3>(const PtrStepSzb src, PtrStepSzb dst, int scale, cudaStream_t stream);
     template void upscale<4>(const PtrStepSzb src, PtrStepSzb dst, int scale, cudaStream_t stream);
-}
 
-namespace
-{
     __device__ __forceinline__ float diffSign(float a, float b)
     {
         return a > b ? 1.0f : a < b ? -1.0f : 0.0f;
@@ -140,7 +128,7 @@ namespace
 
 namespace cv { namespace gpu { namespace device
 {
-    template <> struct TransformFunctorTraits<DiffSign> : DefaultTransformFunctorTraits<DiffSign>
+    template <> struct TransformFunctorTraits<btv_l1_device::DiffSign> : DefaultTransformFunctorTraits<btv_l1_device::DiffSign>
     {
         enum { smart_block_dim_y = 8 };
         enum { smart_shift = 4 };
@@ -153,14 +141,11 @@ namespace btv_l1_device
     {
         transform(src1, src2, dst, DiffSign(), WithOutMask(), stream);
     }
-}
 
-namespace
-{
     __constant__ float c_btvRegWeights[16*16];
 
     template <typename T>
-    __global__ void calcBtvRegularization(const PtrStepSz<T> src, PtrStep<T> dst, const int ksize)
+    __global__ void calcBtvRegularizationKernel(const PtrStepSz<T> src, PtrStep<T> dst, const int ksize)
     {
         const int x = blockIdx.x * blockDim.x + threadIdx.x + ksize;
         const int y = blockIdx.y * blockDim.y + threadIdx.y + ksize;
@@ -180,10 +165,7 @@ namespace
 
         dst(y, x) = dstVal;
     }
-}
 
-namespace btv_l1_device
-{
     void loadBtvWeights(const float* weights, size_t count)
     {
         cudaSafeCall( cudaMemcpyToSymbol(c_btvRegWeights, weights, count * sizeof(float)) );
@@ -197,7 +179,7 @@ namespace btv_l1_device
         const dim3 block(32, 8);
         const dim3 grid(divUp(src.cols, block.x), divUp(src.rows, block.y));
 
-        ::calcBtvRegularization<src_t><<<grid, block>>>((PtrStepSz<src_t>) src, (PtrStepSz<src_t>) dst, ksize);
+        calcBtvRegularizationKernel<src_t><<<grid, block>>>((PtrStepSz<src_t>) src, (PtrStepSz<src_t>) dst, ksize);
         cudaSafeCall( cudaGetLastError() );
 
         cudaSafeCall( cudaDeviceSynchronize() );

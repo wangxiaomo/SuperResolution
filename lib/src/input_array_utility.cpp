@@ -54,7 +54,7 @@ GpuMat getGpuMat(InputArray arr, GpuMat& buf)
     return arr.getGpuMat();
 }
 
-void copy(OutputArray dst, const Mat& src)
+void copy(const Mat& src, OutputArray dst)
 {
     if (dst.kind() == _InputArray::GPU_MAT)
         dst.getGpuMatRef().upload(src);
@@ -62,7 +62,7 @@ void copy(OutputArray dst, const Mat& src)
         src.copyTo(dst);
 }
 
-void copy(OutputArray dst, const GpuMat& src)
+void copy(const GpuMat& src, OutputArray dst)
 {
     if (dst.kind() == _InputArray::GPU_MAT)
         src.copyTo(dst.getGpuMatRef());
@@ -74,8 +74,11 @@ void copy(OutputArray dst, const GpuMat& src)
     }
 }
 
-Mat convertToType(const Mat& src, int depth, int cn, Mat& buf0, Mat& buf1)
+Mat convertToType(const Mat& src, int type, Mat& buf0, Mat& buf1)
 {
+    const int depth = CV_MAT_DEPTH(type);
+    const int cn = CV_MAT_CN(type);
+
     CV_DbgAssert( src.depth() <= CV_64F );
     CV_DbgAssert( src.channels() == 1 || src.channels() == 3 || src.channels() == 4 );
     CV_DbgAssert( depth == CV_8U || depth == CV_32F );
@@ -123,8 +126,11 @@ Mat convertToType(const Mat& src, int depth, int cn, Mat& buf0, Mat& buf1)
     return buf1;
 }
 
-GpuMat convertToType(const GpuMat& src, int depth, int cn, GpuMat& buf0, GpuMat& buf1)
+GpuMat convertToType(const GpuMat& src, int type, GpuMat& buf0, GpuMat& buf1)
 {
+    const int depth = CV_MAT_DEPTH(type);
+    const int cn = CV_MAT_CN(type);
+
     CV_DbgAssert( src.depth() <= CV_64F );
     CV_DbgAssert( src.channels() == 1 || src.channels() == 3 || src.channels() == 4 );
     CV_DbgAssert( depth == CV_8U || depth == CV_32F );

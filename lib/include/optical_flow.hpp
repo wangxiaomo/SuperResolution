@@ -28,10 +28,7 @@
 #ifndef __OPENCV_SR_OPTICAL_FLOW_HPP__
 #define __OPENCV_SR_OPTICAL_FLOW_HPP__
 
-#include <vector>
 #include <opencv2/core/core.hpp>
-#include <opencv2/video/tracking.hpp>
-#include <opencv2/gpu/gpu.hpp>
 #include "super_resolution_export.h"
 
 namespace cv
@@ -42,194 +39,17 @@ namespace cv
         {
         public:
             virtual void calc(InputArray frame0, InputArray frame1, OutputArray flow1, OutputArray flow2 = noArray()) = 0;
-            virtual void collectGarbage();
+            virtual void collectGarbage() = 0;
         };
 
-        class SUPER_RESOLUTION_EXPORT Farneback : public DenseOpticalFlow
-        {
-        public:
-            AlgorithmInfo* info() const;
+        SUPER_RESOLUTION_EXPORT Ptr<DenseOpticalFlow> createOptFlowFarneback();
+        SUPER_RESOLUTION_EXPORT Ptr<DenseOpticalFlow> createOptFlowSimple();
+        SUPER_RESOLUTION_EXPORT Ptr<DenseOpticalFlow> createOptFlowDualTVL1();
 
-            Farneback();
-
-            void calc(InputArray frame0, InputArray frame1, OutputArray flow1, OutputArray flow2);
-            void collectGarbage();
-
-            double pyrScale;
-            int numLevels;
-            int winSize;
-            int numIters;
-            int polyN;
-            double polySigma;
-            int flags;
-
-        private:
-            void call(const Mat& input0, const Mat& input1, OutputArray dst);
-
-            Mat buf[6];
-            Mat flow;
-            std::vector<Mat> flows;
-        };
-
-        class SUPER_RESOLUTION_EXPORT Simple : public DenseOpticalFlow
-        {
-        public:
-            AlgorithmInfo* info() const;
-
-            Simple();
-
-            void calc(InputArray frame0, InputArray frame1, OutputArray flow1, OutputArray flow2);
-            void collectGarbage();
-
-            int layers;
-            int averagingBlockSize;
-            int maxFlow;
-            double sigmaDist;
-            double sigmaColor;
-            int postProcessWindow;
-            double sigmaDistFix;
-            double sigmaColorFix;
-            double occThr;
-            int upscaleAveragingRadius;
-            double upscaleSigmaDist;
-            double upscaleSigmaColor;
-            double speedUpThr;
-
-        private:
-            void call(Mat input0, Mat input1, Mat& dst);
-
-            Mat buf[6];
-            Mat flow;
-            std::vector<Mat> flows;
-        };
-
-        class SUPER_RESOLUTION_EXPORT Dual_TVL1 : public DenseOpticalFlow
-        {
-        public:
-            AlgorithmInfo* info() const;
-
-            Dual_TVL1();
-
-            void calc(InputArray frame0, InputArray frame1, OutputArray flow1, OutputArray flow2);
-            void collectGarbage();
-
-            double tau;
-            double lambda;
-            double theta;
-            int    nscales;
-            int    warps;
-            double epsilon;
-            int iterations;
-            bool useInitialFlow;
-
-        private:
-            void call(const Mat& input0, const Mat& input1, OutputArray dst);
-
-            OpticalFlowDual_TVL1 alg;
-            Mat buf[6];
-            Mat flow;
-            std::vector<Mat> flows;
-        };
-
-        class SUPER_RESOLUTION_EXPORT Brox_GPU : public DenseOpticalFlow
-        {
-        public:
-            AlgorithmInfo* info() const;
-
-            Brox_GPU();
-
-            void calc(InputArray frame0, InputArray frame1, OutputArray flow1, OutputArray flow2);
-            void collectGarbage();
-
-            double alpha;
-            double gamma;
-            double scaleFactor;
-            int innerIterations;
-            int outerIterations;
-            int solverIterations;
-
-        private:
-            void call(const gpu::GpuMat& input0, const gpu::GpuMat& input1, gpu::GpuMat& dst1, gpu::GpuMat& dst2);
-
-            gpu::BroxOpticalFlow alg;
-            gpu::GpuMat buf[6];
-            gpu::GpuMat u, v, flow;
-        };
-
-        class SUPER_RESOLUTION_EXPORT PyrLK_GPU : public DenseOpticalFlow
-        {
-        public:
-            AlgorithmInfo* info() const;
-
-            PyrLK_GPU();
-
-            void calc(InputArray frame0, InputArray frame1, OutputArray flow1, OutputArray flow2);
-            void collectGarbage();
-
-            int winSize;
-            int maxLevel;
-            int iterations;
-
-        private:
-            void call(const gpu::GpuMat& input0, const gpu::GpuMat& input1, gpu::GpuMat& dst1, gpu::GpuMat& dst2);
-
-            gpu::PyrLKOpticalFlow alg;
-            gpu::GpuMat buf[6];
-            gpu::GpuMat u, v, flow;
-        };
-
-        class SUPER_RESOLUTION_EXPORT Farneback_GPU : public DenseOpticalFlow
-        {
-        public:
-            AlgorithmInfo* info() const;
-
-            Farneback_GPU();
-
-            void calc(InputArray frame0, InputArray frame1, OutputArray flow1, OutputArray flow2);
-            void collectGarbage();
-
-            double pyrScale;
-            int numLevels;
-            int winSize;
-            int numIters;
-            int polyN;
-            double polySigma;
-            int flags;
-
-        private:
-            void call(const gpu::GpuMat& input0, const gpu::GpuMat& input1, gpu::GpuMat& dst1, gpu::GpuMat& dst2);
-
-            gpu::FarnebackOpticalFlow alg;
-            gpu::GpuMat buf[6];
-            gpu::GpuMat u, v, flow;
-        };
-
-        class SUPER_RESOLUTION_EXPORT Dual_TVL1_GPU : public DenseOpticalFlow
-        {
-        public:
-            AlgorithmInfo* info() const;
-
-            Dual_TVL1_GPU();
-
-            void calc(InputArray frame0, InputArray frame1, OutputArray flow1, OutputArray flow2);
-            void collectGarbage();
-
-            double tau;
-            double lambda;
-            double theta;
-            int    nscales;
-            int    warps;
-            double epsilon;
-            int iterations;
-            bool useInitialFlow;
-
-        private:
-            void call(const gpu::GpuMat& input0, const gpu::GpuMat& input1, gpu::GpuMat& dst1, gpu::GpuMat& dst2);
-
-            gpu::OpticalFlowDual_TVL1_GPU alg;
-            gpu::GpuMat buf[6];
-            gpu::GpuMat u, v, flow;
-        };
+        SUPER_RESOLUTION_EXPORT Ptr<DenseOpticalFlow> createOptFlowBrox_GPU();
+        SUPER_RESOLUTION_EXPORT Ptr<DenseOpticalFlow> createOptFlowPyrLK_GPU();
+        SUPER_RESOLUTION_EXPORT Ptr<DenseOpticalFlow> createOptFlowFarneback_GPU();
+        SUPER_RESOLUTION_EXPORT Ptr<DenseOpticalFlow> createOptFlowDualTVL1_GPU();
     }
 }
 

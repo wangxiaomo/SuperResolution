@@ -24,7 +24,9 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "super_resolution.hpp"
+#include <opencv2/core/internal.hpp>
 #include <opencv2/gpu/stream_accessor.hpp>
+#include "optical_flow.hpp"
 #include "ring_buffer.hpp"
 
 using namespace std;
@@ -200,288 +202,355 @@ namespace
 
         funcs[src.channels()](src, dst, ksize);
     }
-}
 
-cv::superres::BTV_L1_GPU_Base::BTV_L1_GPU_Base()
-{
-    scale = 4;
-    iterations = 180;
-    lambda = 0.03;
-    tau = 1.3;
-    alpha = 0.7;
-    btvKernelSize = 7;
-    blurKernelSize = 5;
-    blurSigma = 0.0;
-    opticalFlow = new Farneback_GPU;
-
-    curBtvKernelSize = -1;
-    curAlpha = -1.0;
-
-    curBlurKernelSize = -1;
-    curBlurSigma = -1.0;
-    curSrcType = -1;
-}
-
-void cv::superres::BTV_L1_GPU_Base::process(const vector<GpuMat>& src, GpuMat& dst, int baseIdx)
-{
-    CV_DbgAssert( !src.empty() );
-#ifdef _DEBUG
-    for (size_t i = 1; i < src.size(); ++i)
+    // S. Farsiu , D. Robinson, M. Elad, P. Milanfar. Fast and robust multiframe super resolution.
+    // Dennis Mitzel, Thomas Pock, Thomas Schoenemann, Daniel Cremers. Video Super Resolution using Duality Based TV-L1 Optical Flow.
+    class BTVL1Base_GPU
     {
-        CV_DbgAssert( src[i].size() == src[0].size() );
-        CV_DbgAssert( src[i].type() == src[0].type() );
+    public:
+        BTVL1Base_GPU();
+
+        void process(const vector<GpuMat>& src, GpuMat& dst,
+                     const vector<pair<GpuMat, GpuMat> >& motions,
+                     int baseIdx = 0);
+
+    protected:
+        void run(const vector<GpuMat>& src, GpuMat& dst,
+                 const vector<pair<GpuMat, GpuMat> >& relativeMotions,
+                 int baseIdx);
+
+        int scale;
+        int iterations;
+        double lambda;
+        double tau;
+        double alpha;
+        int btvKernelSize;
+        int blurKernelSize;
+        double blurSigma;
+        Ptr<DenseOpticalFlow> opticalFlow;
+
+    private:
+        vector<gpu::GpuMat> src_f;
+
+        vector<float> btvWeights;
+        int curBtvKernelSize;
+        double curAlpha;
+
+        vector<pair<GpuMat, GpuMat> > lowResMotions;
+        vector<pair<GpuMat, GpuMat> > highResMotions;
+        vector<pair<GpuMat, GpuMat> > forward;
+        vector<pair<GpuMat, GpuMat> > backward;
+
+        vector<Ptr<FilterEngine_GPU> > filters;
+        int curBlurKernelSize;
+        double curBlurSigma;
+        int curSrcType;
+
+        GpuMat highRes;
+
+        vector<Stream> streams;
+        vector<GpuMat> diffTerms;
+        vector<GpuMat> a, b, c;
+        GpuMat regTerm;
+    };
+
+    BTVL1Base_GPU::BTVL1Base_GPU()
+    {
+        scale = 4;
+        iterations = 180;
+        lambda = 0.03;
+        tau = 1.3;
+        alpha = 0.7;
+        btvKernelSize = 7;
+        blurKernelSize = 5;
+        blurSigma = 0.0;
+        opticalFlow = createOptFlowDualTVL1_GPU();
+
+        curBtvKernelSize = -1;
+        curAlpha = -1.0;
+
+        curBlurKernelSize = -1;
+        curBlurSigma = -1.0;
+        curSrcType = -1;
     }
-#endif
-    CV_DbgAssert( baseIdx >= 0 && baseIdx < src.size() );
 
-    // calc motions between input frames
-
-    lowResMotions.resize(src.size());
-    for (size_t i = 0; i < src.size(); ++i)
+    void BTVL1Base_GPU::process(const vector<GpuMat>& src, GpuMat& dst, const vector<pair<GpuMat, GpuMat> >& forwardMotions, int baseIdx)
     {
-        if (i != baseIdx)
-            opticalFlow->calc(src[i], src[baseIdx], lowResMotions[i].first, lowResMotions[i].second);
+        CV_DbgAssert( !src.empty() );
+    #ifdef _DEBUG
+        for (size_t i = 1; i < src.size(); ++i)
+        {
+            CV_DbgAssert( src[i].size() == src[0].size() );
+            CV_DbgAssert( src[i].type() == src[0].type() );
+        }
+    #endif
+        CV_DbgAssert( forwardMotions.size() == src.size() - 1 );
+    #ifdef _DEBUG
+        for (size_t i = 1; i < forwardMotions.size(); ++i)
+        {
+            CV_DbgAssert( forwardMotions[i].first.size() == src[0].size() );
+            CV_DbgAssert( forwardMotions[i].second.size() == src[0].size() );
+        }
+    #endif
+        CV_DbgAssert( baseIdx >= 0 && baseIdx < src.size() );
+
+        // convert sources to float
+
+        calcRelativeMotions(forwardMotions, lowResMotions, baseIdx, src[0].size());
+
+        // run
+
+        run(src, dst, lowResMotions, baseIdx);
+    }
+
+    void BTVL1Base_GPU::run(const vector<GpuMat>& src, GpuMat& dst, const vector<pair<GpuMat, GpuMat> >& relativeMotions, int baseIdx)
+    {
+        CV_DbgAssert( scale > 1 );
+        CV_DbgAssert( iterations > 0 );
+        CV_DbgAssert( tau > 0.0 );
+        CV_DbgAssert( alpha > 0.0 );
+        CV_DbgAssert( btvKernelSize > 0 );
+        CV_DbgAssert( blurKernelSize > 0 );
+        CV_DbgAssert( blurSigma >= 0.0 );
+
+        // convert sources to float
+
+        const vector<GpuMat>* yPtr;
+        if (src[0].depth() == CV_32F)
+            yPtr = &src;
         else
         {
-            lowResMotions[i].first.create(src[i].size(), CV_32FC1);
-            lowResMotions[i].first.setTo(Scalar::all(0));
-
-            lowResMotions[i].second.create(src[i].size(), CV_32FC1);
-            lowResMotions[i].second.setTo(Scalar::all(0));
+            src_f.resize(src.size());
+            for (size_t i = 0; i < src.size(); ++i)
+                src[i].convertTo(src_f[i], CV_32F);
+            yPtr = &src_f;
         }
-    }
+        const vector<GpuMat>& y = *yPtr;
 
-    // run
+        // calc motions between input frames
 
-    run(src, dst, lowResMotions, baseIdx);
-}
+        upscaleMotions(relativeMotions, highResMotions, scale);
 
-void cv::superres::BTV_L1_GPU_Base::process(const vector<GpuMat>& src, GpuMat& dst, const vector<pair<GpuMat, GpuMat> >& forwardMotions, int baseIdx)
-{
-    CV_DbgAssert( !src.empty() );
-#ifdef _DEBUG
-    for (size_t i = 1; i < src.size(); ++i)
-    {
-        CV_DbgAssert( src[i].size() == src[0].size() );
-        CV_DbgAssert( src[i].type() == src[0].type() );
-    }
-#endif
-    CV_DbgAssert( forwardMotions.size() == src.size() - 1 );
-#ifdef _DEBUG
-    for (size_t i = 1; i < forwardMotions.size(); ++i)
-    {
-        CV_DbgAssert( forwardMotions[i].first.size() == src[0].size() );
-        CV_DbgAssert( forwardMotions[i].second.size() == src[0].size() );
-    }
-#endif
-    CV_DbgAssert( baseIdx >= 0 && baseIdx < src.size() );
+        forward.resize(highResMotions.size());
+        backward.resize(highResMotions.size());
+        for (size_t i = 0; i < highResMotions.size(); ++i)
+            buildMotionMaps(highResMotions[i], forward[i], backward[i]);
 
-    // convert sources to float
+        // update blur filter and btv weights
 
-    calcRelativeMotions(forwardMotions, lowResMotions, baseIdx, src[0].size());
-
-    // run
-
-    run(src, dst, lowResMotions, baseIdx);
-}
-
-
-void cv::superres::BTV_L1_GPU_Base::run(const vector<GpuMat>& src, GpuMat& dst, const vector<pair<GpuMat, GpuMat> >& relativeMotions, int baseIdx)
-{
-    CV_DbgAssert( scale > 1 );
-    CV_DbgAssert( iterations > 0 );
-    CV_DbgAssert( tau > 0.0 );
-    CV_DbgAssert( alpha > 0.0 );
-    CV_DbgAssert( btvKernelSize > 0 );
-    CV_DbgAssert( blurKernelSize > 0 );
-    CV_DbgAssert( blurSigma >= 0.0 );
-
-    // convert sources to float
-
-    const vector<GpuMat>* yPtr;
-    if (src[0].depth() == CV_32F)
-        yPtr = &src;
-    else
-    {
-        src_f.resize(src.size());
-        for (size_t i = 0; i < src.size(); ++i)
-            src[i].convertTo(src_f[i], CV_32F);
-        yPtr = &src_f;
-    }
-    const vector<GpuMat>& y = *yPtr;
-
-    // calc motions between input frames
-
-    upscaleMotions(relativeMotions, highResMotions, scale);
-
-    forward.resize(highResMotions.size());
-    backward.resize(highResMotions.size());
-    for (size_t i = 0; i < highResMotions.size(); ++i)
-        buildMotionMaps(highResMotions[i], forward[i], backward[i]);
-
-    // update blur filter and btv weights
-
-    if (filters.size() != src.size() || blurKernelSize != curBlurKernelSize || blurSigma != curBlurSigma || y[0].type() != curSrcType)
-    {
-        filters.resize(src.size());
-        for (size_t i = 0; i < src.size(); ++i)
-            filters[i] = createGaussianFilter_GPU(y[0].type(), Size(blurKernelSize, blurKernelSize), blurSigma);
-        curBlurKernelSize = blurKernelSize;
-        curBlurSigma = blurSigma;
-        curSrcType = y[0].type();
-    }
-
-    if (btvWeights.empty() || btvKernelSize != curBtvKernelSize || alpha != curAlpha)
-    {
-        calcBtvWeights(btvKernelSize, alpha, btvWeights);
-        curBtvKernelSize = btvKernelSize;
-        curAlpha = alpha;
-    }
-
-    // initial estimation
-
-    const Size lowResSize = y[0].size();
-    const Size highResSize(lowResSize.width * scale, lowResSize.height * scale);
-
-    gpu::resize(y[baseIdx], highRes, highResSize, 0, 0, INTER_CUBIC);
-
-    // iterations
-
-    streams.resize(src.size());
-    diffTerms.resize(src.size());
-    a.resize(src.size());
-    b.resize(src.size());
-    c.resize(src.size());
-
-    for (int i = 0; i < iterations; ++i)
-    {
-        for (size_t k = 0; k < y.size(); ++k)
+        if (filters.size() != src.size() || blurKernelSize != curBlurKernelSize || blurSigma != curBlurSigma || y[0].type() != curSrcType)
         {
-            // a = M * Ih
-            gpu::remap(highRes, a[k], backward[k].first, backward[k].second, INTER_NEAREST, BORDER_REPLICATE, Scalar(), streams[k]);
-            // b = HM * Ih
-            filters[k]->apply(a[k], b[k], Rect(0,0,-1,-1), streams[k]);
-            // c = DHF * Ih
-            gpu::resize(b[k], c[k], lowResSize, 0, 0, INTER_NEAREST, streams[k]);
-
-            diffSign(y[k], c[k], c[k], streams[k]);
-
-            // a = Dt * diff
-            upscale(c[k], a[k], scale, streams[k]);
-            // b = HtDt * diff
-            filters[k]->apply(a[k], b[k], Rect(0,0,-1,-1), streams[k]);
-            // diffTerm = MtHtDt * diff
-            gpu::remap(b[k], diffTerms[k], forward[k].first, forward[k].second, INTER_NEAREST, BORDER_REPLICATE, Scalar(), streams[k]);
+            filters.resize(src.size());
+            for (size_t i = 0; i < src.size(); ++i)
+                filters[i] = createGaussianFilter_GPU(y[0].type(), Size(blurKernelSize, blurKernelSize), blurSigma);
+            curBlurKernelSize = blurKernelSize;
+            curBlurSigma = blurSigma;
+            curSrcType = y[0].type();
         }
 
-        if (lambda > 0)
-            calcBtvRegularization(highRes, regTerm, btvKernelSize);
+        if (btvWeights.empty() || btvKernelSize != curBtvKernelSize || alpha != curAlpha)
+        {
+            calcBtvWeights(btvKernelSize, alpha, btvWeights);
+            curBtvKernelSize = btvKernelSize;
+            curAlpha = alpha;
+        }
 
-        for (size_t k = 0; k < y.size(); ++k)
-            streams[k].waitForCompletion();
+        // initial estimation
 
-        for (size_t k = 0; k < y.size(); ++k)
-            gpu::addWeighted(highRes, 1.0, diffTerms[k], tau, 0.0, highRes);
+        const Size lowResSize = y[0].size();
+        const Size highResSize(lowResSize.width * scale, lowResSize.height * scale);
 
-        if (lambda > 0)
-            gpu::addWeighted(highRes, 1.0, regTerm, -tau * lambda, 0.0, highRes);
+        gpu::resize(y[baseIdx], highRes, highResSize, 0, 0, INTER_CUBIC);
+
+        // iterations
+
+        streams.resize(src.size());
+        diffTerms.resize(src.size());
+        a.resize(src.size());
+        b.resize(src.size());
+        c.resize(src.size());
+
+        for (int i = 0; i < iterations; ++i)
+        {
+            for (size_t k = 0; k < y.size(); ++k)
+            {
+                // a = M * Ih
+                gpu::remap(highRes, a[k], backward[k].first, backward[k].second, INTER_NEAREST, BORDER_REPLICATE, Scalar(), streams[k]);
+                // b = HM * Ih
+                filters[k]->apply(a[k], b[k], Rect(0,0,-1,-1), streams[k]);
+                // c = DHF * Ih
+                gpu::resize(b[k], c[k], lowResSize, 0, 0, INTER_NEAREST, streams[k]);
+
+                diffSign(y[k], c[k], c[k], streams[k]);
+
+                // a = Dt * diff
+                upscale(c[k], a[k], scale, streams[k]);
+                // b = HtDt * diff
+                filters[k]->apply(a[k], b[k], Rect(0,0,-1,-1), streams[k]);
+                // diffTerm = MtHtDt * diff
+                gpu::remap(b[k], diffTerms[k], forward[k].first, forward[k].second, INTER_NEAREST, BORDER_REPLICATE, Scalar(), streams[k]);
+            }
+
+            if (lambda > 0)
+                calcBtvRegularization(highRes, regTerm, btvKernelSize);
+
+            for (size_t k = 0; k < y.size(); ++k)
+                streams[k].waitForCompletion();
+
+            for (size_t k = 0; k < y.size(); ++k)
+                gpu::addWeighted(highRes, 1.0, diffTerms[k], tau, 0.0, highRes);
+
+            if (lambda > 0)
+                gpu::addWeighted(highRes, 1.0, regTerm, -tau * lambda, 0.0, highRes);
+        }
+
+        Rect inner(btvKernelSize, btvKernelSize, highRes.cols - 2 * btvKernelSize, highRes.rows - 2 * btvKernelSize);
+        highRes(inner).convertTo(dst, src[0].depth());
     }
-
-    Rect inner(btvKernelSize, btvKernelSize, highRes.cols - 2 * btvKernelSize, highRes.rows - 2 * btvKernelSize);
-    highRes(inner).convertTo(dst, src[0].depth());
-}
 
 ////////////////////////////////////////////////////////////
 
-cv::superres::BTV_L1_GPU::BTV_L1_GPU()
-{
-    temporalAreaRadius = 4;
-}
+    class BTVL1_GPU : public SuperResolution, private BTVL1Base_GPU
+    {
+    public:
+        AlgorithmInfo* info() const;
 
-void cv::superres::BTV_L1_GPU::initImpl(Ptr<IFrameSource>& frameSource)
-{
-    const int cacheSize = 2 * temporalAreaRadius + 1;
+        BTVL1_GPU();
 
-    frames.resize(cacheSize);
-    results.resize(cacheSize);
-    motions.resize(cacheSize);
+    protected:
+        void initImpl(Ptr<IFrameSource>& frameSource);
+        Mat processImpl(Ptr<IFrameSource>& frameSource);
 
-    storePos = -1;
+    private:
+        void addNewFrame(const Mat& frame);
+        void processFrame(int idx);
 
-    for (int t = -temporalAreaRadius; t <= temporalAreaRadius; ++t)
+        int temporalAreaRadius;
+
+        std::vector<gpu::GpuMat> frames;
+        std::vector<gpu::GpuMat> results;
+
+        std::vector<std::pair<gpu::GpuMat, gpu::GpuMat> > motions;
+        gpu::GpuMat d_frame;
+        gpu::GpuMat prevFrame;
+
+        int storePos;
+        int procPos;
+        int outPos;
+
+        std::vector<gpu::GpuMat> src;
+        std::vector<std::pair<gpu::GpuMat, gpu::GpuMat> > relMotions;
+        gpu::GpuMat dst;
+        Mat h_dst;
+    };
+
+    CV_INIT_ALGORITHM(BTVL1_GPU, "SuperResolution.BTVL1_GPU",
+                      obj.info()->addParam(obj, "scale", obj.scale, false, 0, 0, "Scale factor.");
+                      obj.info()->addParam(obj, "iterations", obj.iterations, false, 0, 0, "Iteration count.");
+                      obj.info()->addParam(obj, "tau", obj.tau, false, 0, 0, "Asymptotic value of steepest descent method.");
+                      obj.info()->addParam(obj, "lambda", obj.lambda, false, 0, 0, "Weight parameter to balance data term and smoothness term.");
+                      obj.info()->addParam(obj, "alpha", obj.alpha, false, 0, 0, "Parameter of spacial distribution in btv.");
+                      obj.info()->addParam(obj, "btvKernelSize", obj.btvKernelSize, false, 0, 0, "Kernel size of btv filter.");
+                      obj.info()->addParam(obj, "blurKernelSize", obj.blurKernelSize, false, 0, 0, "Gaussian blur kernel size.");
+                      obj.info()->addParam(obj, "blurSigma", obj.blurSigma, false, 0, 0, "Gaussian blur sigma.");
+                      obj.info()->addParam(obj, "temporalAreaRadius", obj.temporalAreaRadius, false, 0, 0, "Radius of the temporal search area.");
+                      obj.info()->addParam<DenseOpticalFlow>(obj, "opticalFlow", obj.opticalFlow, false, 0, 0, "Dense optical flow algorithm."));
+
+    BTVL1_GPU::BTVL1_GPU()
+    {
+        temporalAreaRadius = 4;
+    }
+
+    void BTVL1_GPU::initImpl(Ptr<IFrameSource>& frameSource)
+    {
+        const int cacheSize = 2 * temporalAreaRadius + 1;
+
+        frames.resize(cacheSize);
+        results.resize(cacheSize);
+        motions.resize(cacheSize);
+
+        storePos = -1;
+
+        for (int t = -temporalAreaRadius; t <= temporalAreaRadius; ++t)
+        {
+            Mat frame = frameSource->nextFrame();
+            CV_Assert( !frame.empty() );
+            addNewFrame(frame);
+        }
+
+        for (int i = 0; i <= temporalAreaRadius; ++i)
+            processFrame(i);
+
+        procPos = temporalAreaRadius;
+        outPos = -1;
+    }
+
+    Mat BTVL1_GPU::processImpl(Ptr<IFrameSource>& frameSource)
     {
         Mat frame = frameSource->nextFrame();
-        CV_Assert( !frame.empty() );
         addNewFrame(frame);
+
+        if (procPos < storePos)
+        {
+            ++procPos;
+            processFrame(procPos);
+        }
+
+        if (outPos < storePos)
+        {
+            ++outPos;
+            at(outPos, results).convertTo(dst, CV_8U);
+            dst.download(h_dst);
+            return h_dst;
+        }
+
+        return Mat();
     }
 
-    for (int i = 0; i <= temporalAreaRadius; ++i)
-        processFrame(i);
+    void BTVL1_GPU::addNewFrame(const Mat& frame)
+    {
+        if (frame.empty())
+            return;
 
-    procPos = temporalAreaRadius;
-    outPos = -1;
+        CV_DbgAssert( storePos < 0 || frame.size() == at(storePos, frames).size() );
+
+        d_frame.upload(frame);
+
+        ++storePos;
+        d_frame.convertTo(at(storePos, frames), CV_32F);
+
+        if (storePos > 0)
+            opticalFlow->calc(prevFrame, d_frame, at(storePos - 1, motions).first, at(storePos - 1, motions).second);
+
+        d_frame.copyTo(prevFrame);
+    }
+
+    void BTVL1_GPU::processFrame(int idx)
+    {
+        const int startIdx = max(idx - temporalAreaRadius, 0);
+        const int procIdx = idx;
+        const int endIdx = min(startIdx + 2 * temporalAreaRadius, storePos);
+
+        src.resize(endIdx - startIdx + 1);
+        relMotions.resize(endIdx - startIdx);
+        int baseIdx = -1;
+
+        for (int i = startIdx, k = 0; i <= endIdx; ++i, ++k)
+        {
+            if (i == procIdx)
+                baseIdx = k;
+
+            src[k] = at(i, frames);
+
+            if (i < endIdx)
+                relMotions[k] = at(i, motions);
+        }
+
+        process(src, at(idx, results), relMotions, baseIdx);
+    }
 }
 
-Mat cv::superres::BTV_L1_GPU::processImpl(Ptr<IFrameSource>& frameSource)
+Ptr<SuperResolution> cv::superres::createSuperResBTVL1_GPU()
 {
-    Mat frame = frameSource->nextFrame();
-    addNewFrame(frame);
-
-    if (procPos < storePos)
-    {
-        ++procPos;
-        processFrame(procPos);
-    }
-
-    if (outPos < storePos)
-    {
-        ++outPos;
-        at(outPos, results).convertTo(dst, CV_8U);
-        dst.download(h_dst);
-        return h_dst;
-    }
-
-    return Mat();
-}
-
-void cv::superres::BTV_L1_GPU::addNewFrame(const Mat& frame)
-{
-    if (frame.empty())
-        return;
-
-    CV_DbgAssert( storePos < 0 || frame.size() == at(storePos, frames).size() );
-
-    d_frame.upload(frame);
-
-    ++storePos;
-    d_frame.convertTo(at(storePos, frames), CV_32F);
-
-    if (storePos > 0)
-        opticalFlow->calc(prevFrame, d_frame, at(storePos - 1, motions).first, at(storePos - 1, motions).second);
-
-    d_frame.copyTo(prevFrame);
-}
-
-void cv::superres::BTV_L1_GPU::processFrame(int idx)
-{
-    const int startIdx = max(idx - temporalAreaRadius, 0);
-    const int procIdx = idx;
-    const int endIdx = min(startIdx + 2 * temporalAreaRadius, storePos);
-
-    src.resize(endIdx - startIdx + 1);
-    relMotions.resize(endIdx - startIdx);
-    int baseIdx = -1;
-
-    for (int i = startIdx, k = 0; i <= endIdx; ++i, ++k)
-    {
-        if (i == procIdx)
-            baseIdx = k;
-
-        src[k] = at(i, frames);
-
-        if (i < endIdx)
-            relMotions[k] = at(i, motions);
-    }
-
-    process(src, at(idx, results), relMotions, baseIdx);
+    return new BTVL1_GPU;
 }
