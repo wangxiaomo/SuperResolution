@@ -35,8 +35,7 @@
 SUPER_RESOLUTION_NO_EXPORT cv::Mat getMat(cv::InputArray arr, cv::Mat& buf);
 SUPER_RESOLUTION_NO_EXPORT cv::gpu::GpuMat getGpuMat(cv::InputArray arr, cv::gpu::GpuMat& buf);
 
-SUPER_RESOLUTION_NO_EXPORT void copy(const cv::Mat& src, cv::OutputArray dst);
-SUPER_RESOLUTION_NO_EXPORT void copy(const cv::gpu::GpuMat& src, cv::OutputArray dst);
+SUPER_RESOLUTION_NO_EXPORT void copy(cv::InputArray src, cv::OutputArray dst);
 
 SUPER_RESOLUTION_NO_EXPORT cv::Mat convertToType(const cv::Mat& src, int type, cv::Mat& buf0, cv::Mat& buf1);
 SUPER_RESOLUTION_NO_EXPORT cv::gpu::GpuMat convertToType(const cv::gpu::GpuMat& src, int type, cv::gpu::GpuMat& buf0, cv::gpu::GpuMat& buf1);

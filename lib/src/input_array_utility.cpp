@@ -25,6 +25,7 @@
 
 #include "input_array_utility.hpp"
 #include <limits>
+#include <opencv2/core/opengl_interop.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/gpu/gpu.hpp>
 
@@ -34,146 +35,218 @@ using namespace cv::gpu;
 
 Mat getMat(InputArray arr, Mat& buf)
 {
-    if (arr.kind() == _InputArray::GPU_MAT)
+    switch (arr.kind())
     {
+    case _InputArray::GPU_MAT:
         arr.getGpuMat().download(buf);
         return buf;
-    }
 
-    return arr.getMat();
+    case _InputArray::OPENGL_BUFFER:
+        arr.getGlBuffer().copyTo(buf);
+        return buf;
+
+    case _InputArray::OPENGL_TEXTURE2D:
+        arr.getGlTexture2D().copyTo(buf);
+        return buf;
+
+    default:
+        return arr.getMat();
+    }
 }
 
 GpuMat getGpuMat(InputArray arr, GpuMat& buf)
 {
-    if (arr.kind() != _InputArray::GPU_MAT)
+    switch (arr.kind())
     {
+    case _InputArray::GPU_MAT:
+        return arr.getGpuMat();
+
+    case _InputArray::OPENGL_BUFFER:
+        arr.getGlBuffer().copyTo(buf);
+        return buf;
+
+    case _InputArray::OPENGL_TEXTURE2D:
+        arr.getGlTexture2D().copyTo(buf);
+        return buf;
+
+    default:
         buf.upload(arr.getMat());
         return buf;
     }
-
-    return arr.getGpuMat();
 }
 
-void copy(const Mat& src, OutputArray dst)
+namespace
 {
-    if (dst.kind() == _InputArray::GPU_MAT)
-        dst.getGpuMatRef().upload(src);
-    else
-        src.copyTo(dst);
-}
-
-void copy(const GpuMat& src, OutputArray dst)
-{
-    if (dst.kind() == _InputArray::GPU_MAT)
-        src.copyTo(dst.getGpuMatRef());
-    else
+    void mat2mat(InputArray src, OutputArray dst)
     {
-        dst.create(src.size(), src.type());
-        Mat h_dst = dst.getMat();
-        src.download(h_dst);
+        src.getMat().copyTo(dst);
+    }
+    void arr2buf(InputArray src, OutputArray dst)
+    {
+        dst.getGlBufferRef().copyFrom(src);
+    }
+    void arr2tex(InputArray src, OutputArray dst)
+    {
+        dst.getGlTexture2D().copyFrom(src);
+    }
+    void mat2gpu(InputArray src, OutputArray dst)
+    {
+        dst.getGpuMatRef().upload(src.getMat());
+    }
+    void buf2arr(InputArray src, OutputArray dst)
+    {
+        src.getGlBuffer().copyTo(dst);
+    }
+    void tex2arr(InputArray src, OutputArray dst)
+    {
+        src.getGlTexture2D().copyTo(dst);
+    }
+    void gpu2mat(InputArray src, OutputArray dst)
+    {
+        GpuMat d = src.getGpuMat();
+        dst.create(d.size(), d.type());
+        Mat m = dst.getMat();
+        d.download(m);
+    }
+    void gpu2gpu(InputArray src, OutputArray dst)
+    {
+        src.getGpuMat().copyTo(dst.getGpuMatRef());
+    }
+}
+
+void copy(InputArray src, OutputArray dst)
+{
+    typedef void (*func_t)(InputArray src, OutputArray dst);
+    static const func_t funcs[10][10] =
+    {
+        {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {0, mat2mat, mat2mat, mat2mat, mat2mat, mat2mat, mat2mat, arr2buf, arr2tex, mat2gpu},
+        {0, mat2mat, mat2mat, mat2mat, mat2mat, mat2mat, mat2mat, arr2buf, arr2tex, mat2gpu},
+        {0, mat2mat, mat2mat, mat2mat, mat2mat, mat2mat, mat2mat, arr2buf, arr2tex, mat2gpu},
+        {0, mat2mat, mat2mat, mat2mat, mat2mat, mat2mat, mat2mat, arr2buf, arr2tex, mat2gpu},
+        {0, mat2mat, mat2mat, mat2mat, mat2mat, mat2mat, mat2mat, arr2buf, arr2tex, mat2gpu},
+        {0, mat2mat, mat2mat, mat2mat, mat2mat, mat2mat, mat2mat, arr2buf, arr2tex, mat2gpu},
+        {0, buf2arr, buf2arr, buf2arr, buf2arr, buf2arr, buf2arr, buf2arr, buf2arr, buf2arr},
+        {0, tex2arr, tex2arr, tex2arr, tex2arr, tex2arr, tex2arr, tex2arr, tex2arr, tex2arr},
+        {0, gpu2mat, gpu2mat, gpu2mat, gpu2mat, gpu2mat, gpu2mat, arr2buf, arr2tex, gpu2gpu}
+    };
+
+    const int src_kind = src.kind() >> _InputArray::KIND_SHIFT;
+    const int dst_kind = dst.kind() >> _InputArray::KIND_SHIFT;
+
+    CV_DbgAssert( src_kind >= 0 && src_kind < 10 );
+    CV_DbgAssert( dst_kind >= 0 && dst_kind < 10 );
+
+    const func_t func = funcs[src_kind][dst_kind];
+    CV_DbgAssert( func != 0 );
+
+    func(src, dst);
+}
+
+namespace
+{
+    void convertToCn(InputArray src, OutputArray dst, int cn)
+    {
+        CV_DbgAssert( src.channels() == 1 || src.channels() == 3 || src.channels() == 4 );
+        CV_DbgAssert( cn == 1 || cn == 3 || cn == 4 );
+
+        static const int codes[5][5] =
+        {
+            {-1, -1, -1, -1, -1},
+            {-1, -1, -1, COLOR_GRAY2BGR, COLOR_GRAY2BGRA},
+            {-1, -1, -1, -1, -1},
+            {-1, COLOR_BGR2GRAY, -1, -1, COLOR_BGR2BGRA},
+            {-1, COLOR_BGRA2GRAY, -1, COLOR_BGRA2BGR, -1},
+        };
+
+        const int code = codes[src.channels()][cn];
+        CV_DbgAssert( code >= 0 );
+
+        switch (src.kind())
+        {
+        case _InputArray::GPU_MAT:
+            cvtColor(src.getGpuMat(), dst.getGpuMatRef(), code, cn);
+
+        default:
+            cvtColor(src, dst, code, cn);
+        }
+    }
+
+    void convertToDepth(InputArray src, OutputArray dst, int depth)
+    {
+        CV_DbgAssert( src.depth() <= CV_64F );
+        CV_DbgAssert( depth == CV_8U || depth == CV_32F );
+
+        static const double maxVals[] =
+        {
+            numeric_limits<uchar>::max(),
+            numeric_limits<schar>::max(),
+            numeric_limits<ushort>::max(),
+            numeric_limits<short>::max(),
+            numeric_limits<int>::max(),
+            1.0,
+            1.0,
+        };
+
+        const double scale = maxVals[depth] / maxVals[src.depth()];
+
+        switch (src.kind())
+        {
+        case _InputArray::GPU_MAT:
+            src.getGpuMat().convertTo(dst.getGpuMatRef(), depth, scale);
+
+        default:
+            src.getMat().convertTo(dst, depth, scale);
+        }
     }
 }
 
 Mat convertToType(const Mat& src, int type, Mat& buf0, Mat& buf1)
 {
+    if (src.type() == type)
+        return src;
+
     const int depth = CV_MAT_DEPTH(type);
     const int cn = CV_MAT_CN(type);
 
-    CV_DbgAssert( src.depth() <= CV_64F );
-    CV_DbgAssert( src.channels() == 1 || src.channels() == 3 || src.channels() == 4 );
-    CV_DbgAssert( depth == CV_8U || depth == CV_32F );
-    CV_DbgAssert( cn == 1 || cn == 3 || cn == 4 );
-
-    Mat result;
-
     if (src.depth() == depth)
-        result = src;
-    else
     {
-        static const double maxVals[] =
-        {
-            numeric_limits<uchar>::max(),
-            numeric_limits<schar>::max(),
-            numeric_limits<ushort>::max(),
-            numeric_limits<short>::max(),
-            numeric_limits<int>::max(),
-            1.0,
-            1.0,
-        };
-
-        const double scale = maxVals[depth] / maxVals[src.depth()];
-
-        src.convertTo(buf0, depth, scale);
-        result = buf0;
+        convertToCn(src, buf0, cn);
+        return buf0;
     }
 
-    if (result.channels() == cn)
-        return result;
-
-    static const int codes[5][5] =
+    if (src.channels() == cn)
     {
-        {-1, -1, -1, -1, -1},
-        {-1, -1, -1, COLOR_GRAY2BGR, COLOR_GRAY2BGRA},
-        {-1, -1, -1, -1, -1},
-        {-1, COLOR_BGR2GRAY, -1, -1, COLOR_BGR2BGRA},
-        {-1, COLOR_BGRA2GRAY, -1, COLOR_BGRA2BGR, -1},
-    };
+        convertToDepth(src, buf1, depth);
+        return buf1;
+    }
 
-    const int code = codes[src.channels()][cn];
-    CV_DbgAssert( code >= 0 );
-
-    cvtColor(result, buf1, code, cn);
+    convertToCn(src, buf0, cn);
+    convertToDepth(buf0, buf1, depth);
     return buf1;
 }
 
 GpuMat convertToType(const GpuMat& src, int type, GpuMat& buf0, GpuMat& buf1)
 {
+    if (src.type() == type)
+        return src;
+
     const int depth = CV_MAT_DEPTH(type);
     const int cn = CV_MAT_CN(type);
 
-    CV_DbgAssert( src.depth() <= CV_64F );
-    CV_DbgAssert( src.channels() == 1 || src.channels() == 3 || src.channels() == 4 );
-    CV_DbgAssert( depth == CV_8U || depth == CV_32F );
-    CV_DbgAssert( cn == 1 || cn == 3 || cn == 4 );
-
-    GpuMat result;
-
     if (src.depth() == depth)
-        result = src;
-    else
     {
-        static const double maxVals[] =
-        {
-            numeric_limits<uchar>::max(),
-            numeric_limits<schar>::max(),
-            numeric_limits<ushort>::max(),
-            numeric_limits<short>::max(),
-            numeric_limits<int>::max(),
-            1.0,
-            1.0,
-        };
-
-        const double scale = maxVals[depth] / maxVals[src.depth()];
-
-        src.convertTo(buf0, depth, scale);
-        result = buf0;
+        convertToCn(src, buf0, cn);
+        return buf0;
     }
 
-    if (result.channels() == cn)
-        return result;
-
-    static const int codes[5][5] =
+    if (src.channels() == cn)
     {
-        {-1, -1, -1, -1, -1},
-        {-1, -1, -1, COLOR_GRAY2BGR, COLOR_GRAY2BGRA},
-        {-1, -1, -1, -1, -1},
-        {-1, COLOR_BGR2GRAY, -1, -1, COLOR_BGR2BGRA},
-        {-1, COLOR_BGRA2GRAY, -1, COLOR_BGRA2BGR, -1},
-    };
+        convertToDepth(src, buf1, depth);
+        return buf1;
+    }
 
-    const int code = codes[src.channels()][cn];
-    CV_DbgAssert( code >= 0 );
-
-    gpu::cvtColor(result, buf1, code, cn);
+    convertToCn(src, buf0, cn);
+    convertToDepth(buf0, buf1, depth);
     return buf1;
 }

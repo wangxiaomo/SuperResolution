@@ -25,6 +25,7 @@
 
 #include "super_resolution.hpp"
 #include <opencv2/core/internal.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
 #include "optical_flow.hpp"
 #include "ring_buffer.hpp"
 

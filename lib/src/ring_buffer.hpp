@@ -29,20 +29,28 @@
 #define __RING_BUFFER_HPP__
 
 #include <vector>
-#include <opencv2/core/core.hpp>
-#include <opencv2/imgproc/imgproc.hpp>
 #include "super_resolution_export.h"
 
 template <typename T, class A>
 SUPER_RESOLUTION_NO_EXPORT inline const T& at(int index, const std::vector<T, A>& items)
 {
-    return items[cv::borderInterpolate(index, static_cast<int>(items.size()), cv::BORDER_WRAP)];
+    const int len = static_cast<int>(items.size());
+    if (index < 0)
+        index -= ((index - len + 1) / len) * len;
+    if (index >= len)
+        index %= len;
+    return items[index];
 }
 
 template <typename T, class A>
 SUPER_RESOLUTION_NO_EXPORT inline T& at(int index, std::vector<T, A>& items)
 {
-    return items[cv::borderInterpolate(index, static_cast<int>(items.size()), cv::BORDER_WRAP)];
+    const int len = static_cast<int>(items.size());
+    if (index < 0)
+        index -= ((index - len + 1) / len) * len;
+    if (index >= len)
+        index %= len;
+    return items[index];
 }
 
 #endif // __RING_BUFFER_HPP__

@@ -72,7 +72,7 @@ namespace
         Mat input0 = ::convertToType(frame0, work_type, buf[2], buf[3]);
         Mat input1 = ::convertToType(frame1, work_type, buf[4], buf[5]);
 
-        if (!_flow2.needed() && _flow1.kind() != _InputArray::GPU_MAT)
+        if (!_flow2.needed() && _flow1.kind() < _InputArray::OPENGL_BUFFER)
         {
             call(input0, input1, _flow1);
             return;
