@@ -166,9 +166,11 @@ namespace
         {
         case _InputArray::GPU_MAT:
             cvtColor(src.getGpuMat(), dst.getGpuMatRef(), code, cn);
+            break;
 
         default:
             cvtColor(src, dst, code, cn);
+            break;
         }
     }
 
@@ -194,9 +196,11 @@ namespace
         {
         case _InputArray::GPU_MAT:
             src.getGpuMat().convertTo(dst.getGpuMatRef(), depth, scale);
+            break;
 
         default:
             src.getMat().convertTo(dst, depth, scale);
+            break;
         }
     }
 }
